@@ -1,0 +1,92 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(data.table)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(sctransform)
+library(ggsci)
+library(paletteer)
+library(Matrix)
+set.seed(100)
+d_palettes <- palettes_d_names  # View all color palettes
+
+# Set working directory
+setwd("E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis")
+
+# Read data
+HCC <- readRDS('./RDS/HCC_merge.RDS')
+
+# Calculate the proportion of mitochondrial genes
+if(T){    
+  HCC[["percent.mt"]] <- PercentageFeatureSet(HCC, pattern = "^MT-") 
+}
+
+# Calculate the proportion of ribosomal genes
+if(T){
+  HCC[["percent.rb"]] <- PercentageFeatureSet(HCC, pattern = "^RP[SL0-9]")
+}
+
+# Calculate log10GenesPerUMI
+HCC$log10GenesPerUMI <- log10(HCC$nFeature_RNA) / log10(HCC$nCount_RNA)
+
+## Quality control plotting ########################################################################
+plot.features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb")
+# Violin plot before quality control
+library(ggpubr)
+p1 <- VlnPlot(HCC, group.by="orig.ident", pt.size = 0, features = 'nFeature_RNA') + labs(title = 'nFeature_RNA', hjust=0.5) + xlab(NULL)
+p2 <- VlnPlot(HCC, group.by="orig.ident", pt.size = 0, features = 'nCount_RNA') + labs(title = 'nCount_RNA', hjust=0.5) + xlab(NULL)
+p3 <- VlnPlot(HCC, group.by="orig.ident", pt.size = 0, features = 'percent.mt') + labs(title = 'percent.mt', hjust=0.5) + xlab(NULL)
+p4 <- VlnPlot(HCC, group.by="orig.ident", pt.size = 0, features = 'percent.rb') + labs(title = 'percent.rb', hjust=0.5) + xlab(NULL)
+ggarrange(p1, p2, p3, p4, common.legend = TRUE, legend="right")
+ggsave(filename = './Fig/QC/Pre-QC Violin Plot.pdf', height = 8, width = 12)
+
+p1 <- FeatureScatter(HCC, group.by="orig.ident", feature1 = "nCount_RNA", feature2 = "percent.mt")
+p2 <- FeatureScatter(HCC, group.by="orig.ident", feature1 = "nCount_RNA", feature2 = "percent.rb")
+p3 <- FeatureScatter(HCC, group.by="orig.ident", feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+ggarrange(p1, p2, p3, ncol = 3, common.legend = TRUE, legend="right")
+ggsave(filename = './Fig/QC/QC Metrics.pdf', height = 8, width = 12)
+
+# Visualize the number of UMIs per cell
+HCC@meta.data %>% 
+  ggplot(aes(color=orig.ident, x=nCount_RNA, fill=orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  ylab("Cell density") +
+  geom_vline(xintercept = c(1000))
+ggsave(filename = './Fig/QC/Number of UMIs per Cell.pdf', height = 6, width = 8)
+####################################################################################
+## Cell filtering
+HCC1 <- subset(HCC, subset = (nCount_RNA > 1000 & nFeature_RNA > 500 & log10GenesPerUMI > 0.8 & percent.mt < 8 & percent.rb > 1))
+
+load('./RDS/HCC_filted.RData')
+save(HCC1, file = './RDS/HCC_filted.RData')
+#############################################################################
+## Batch effect removal & Doublet removal
+## Official normalization workflow
+combined <- NormalizeData(HCC1)
+# Cell-level filtering
+combined <- FindVariableFeatures(combined)
+combined <- ScaleData(combined)
+## SCT normalization workflow
+# Run sctransform, vars.to.regress: This can be adjusted according to your data content, e.g., to remove cell cycle effects
+combined <- SCTransform(combined, method = 'glmGamPoi', vars.to.regress = c("percent.mt", "percent.rb"))
+combined <- RunPCA(combined)
+
+# Visualization
+combined <- FindNeighbors(combined, reduction = "harmony", dims = pc.num)
+combined <- FindClusters(combined, resolution = c(0.1), Method='igraph')
+combined <- RunUMAP(combined, reduction = "harmony", dims = pc.num, reduction.name = "umap.harmony")
+combined <- RunTSNE(combined, reduction = "harmony", dims = pc.num)
+
+# Set default grouping
+combined$harmony_clusters <- factor(combined$SCT_snn_res.0.1, levels = c(0:12))
+# Assign cluster identity
+Idents(object = combined) <- 'harmony_clusters'
+
+DimPlot(combined, reduction = "umap.harmony", group.by = c("orig.ident", "harmony_clusters"), combine = T, label = T) +
+  scale_color_manual(values=paletteer_d("ggthemes::Classic_20", n=18))
+ggsave(filename = './Fig/Batch Removal/Post-Harmony Dataset + Cell Distribution.pdf', height = 8, width = 16)
+

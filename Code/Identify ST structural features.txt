@@ -1,0 +1,115 @@
+library(Seurat)
+library(hdf5r)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+set.seed(100)
+# d_palettes <- palettes_d_names # View all color palettes
+# Set working directory
+setwd("E:/Desktop/ST")
+# Read data
+#data <- Read10X_h5('./data/ST/GSE245908/GSM7850822/GSM7850822.h5', use.names = T)
+## Create an empty Seurat object
+ST_1 <- Load10X_Spatial(
+  data.dir = "E:/Desktop/ST/data/GSE245908/GSM7850822",   # Path from the previous step
+  filename = 'filtered_feature_bc_matrix.h5', # Name of the h5 matrix file
+  slice = "image"
+)   # H&E image name (custom)
+ST_1$orig.ident <- "GSM7850822"
+
+## Create an empty Seurat object
+ST_2 <- Load10X_Spatial(
+  data.dir = "E:/Desktop/ST/data/GSE245908/GSM7850823",   # Path from the previous step
+  filename = 'filtered_feature_bc_matrix.h5', # Name of the h5 matrix file
+  slice = "image"
+)   # H&E image name (custom)
+ST_2$orig.ident <- "GSM7850823"
+
+## Batch read GSE243367
+#path = './data/ST/GSE243367'
+#samples = list.files(path)
+#samples 
+#sceList = lapply(samples, function(pro){ 
+#  #pro = samples[1] 
+#  print(pro) 
+#  folder = file.path(path, pro) 
+#  print(pro)
+#  print(folder)
+#  # Import loom file
+#  counts <- Read10X(data.dir = folder)
+#  sce = CreateSeuratObject(counts, project = pro)
+#  return(sce)
+#})
+#names(sceList)  
+#ST_3 = merge(x = sceList[[1]],
+#             y = sceList[-1],
+#             add.cell.ids = samples) 
+#Idents(ST_3)
+########################################################################################
+## Set the working data and save address
+ST <- ST_2
+setwd('E:/Desktop/ST/Fig/GSE245908/GSM7850823')
+## Pre-processing
+ST$percent.mt <- PercentageFeatureSet(ST, pattern = "^MT|^MT-") 
+ST$percent.rb <- PercentageFeatureSet(ST, pattern = "^RP")
+# Visualize statistical metrics using violin plots
+VlnPlot(ST, features = c("nCount_Spatial", "nFeature_Spatial", "percent.mt", 
+                         "percent.rb"), pt.size = 0.1, ncol = 2) + NoLegend()
+ggsave(filename = './Statistical Metrics Before Filtering.pdf', height = 8, width = 12)
+SpatialFeaturePlot(ST, features = c("nCount_Spatial", "nFeature_Spatial", "percent.mt", "percent.rb"))
+ggsave(filename = './Spatial Expression of Statistical Metrics Before Filtering.pdf', height = 8, width = 12)
+
+# Data filtering
+# ST = ST[, ST$nFeature_Spatial > 500 & ST$percent.mt < 10 & ST$percent.rb < 20]
+# Re-visualize filtered statistical metrics:
+SpatialFeaturePlot(ST, features = c("nCount_Spatial", "nFeature_Spatial", "percent.mt", "percent.rb"))
+ggsave(filename = './Statistical Metrics After Filtering.pdf', height = 8, width = 12)
+## View the most expressed genes
+C = ST@assays$Spatial$counts
+C@x = C@x / rep.int(colSums(C), diff(C@p))
+most_expressed <- order(Matrix::rowSums(C), decreasing = T)[20:1]
+
+boxplot(as.matrix(t(C[most_expressed, ])), cex = 0.1, las = 1, xlab = "% total count per cell", 
+        col = (scales::hue_pal())(20)[20:1], horizontal = TRUE)
+## Filter Mitochondrial genes
+# Filter Mitochondrial
+ST <- ST[!grepl("^MT|^MT-", rownames(ST)), ]
+
+## SCT normalization
+#ST <- ST %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+ST <- SCTransform(ST, assay = "Spatial", verbose = FALSE)
+ST <- RunPCA(ST, assay = "SCT", verbose = FALSE)
+#### PCA Elbow plot for quantitative identification
+pct <- ST[["pca"]]@stdev / sum(ST[["pca"]]@stdev) * 100 
+cumu <- cumsum(pct)
+pc.use <- min(which(cumu > 90 & pct < 5)[1], sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1)
+ElbowPlot(ST, ndims = 30)$data %>% ggplot() +
+  geom_point(aes(x = dims, y = stdev)) +
+  geom_vline(xintercept = pc.use, color = "darkred", linetype = "dashed") +
+  annotate("text", x = pc.use + 1.5, y = ST[["pca"]]@stdev[pc.use] + 0.5, label = paste("dim = ", pc.use), size = 5, color = "darkred") +
+  theme_bw() + ggtitle("Elbow plot: quantitative approach") +
+  theme(plot.title = element_text(size = 14, hjust = 0.5))
+ggsave(filename = './Elbow Plot.pdf', height = 6, width = 8)
+pc.num = 1:20
+## Data clustering
+ST <- FindNeighbors(ST, reduction = "pca", dims = pc.num)
+ST <- FindClusters(ST, verbose = FALSE, resolution = 1.2)
+SpatialPlot(ST, label = TRUE, label.size = 5)
+ggsave(filename = './Spatial Cluster Distribution.pdf', height = 6, width = 8)
+# UMAP dimensionality reduction
+ST <- RunUMAP(ST, reduction = "pca", dims = pc.num)
+DimPlot(ST, reduction = "umap", label = TRUE)
+ggsave(filename = './UMAP.pdf', height = 6, width = 8)
+
+ST <- RunTSNE(ST, reduction = "pca", dims = pc.num)
+DimPlot(ST, reduction = "tsne", label = TRUE)
+ggsave(filename = './TSNE.pdf', height = 6, width = 8)
+# Use the cells.highlight parameter to highlight specific cells in SpatialDimPlot()
+SpatialDimPlot(ST, cells.highlight = CellsByIdentities(object = ST, idents = levels(ST@active.ident)), 
+               facet.highlight = TRUE, ncol = 4)
+ggsave(filename = './Position of Each Cluster in Space.pdf', height = 8, width = 12)
+# Visualize Cluster distribution and H&E tissue section
+p1 <- SpatialPlot(ST, label = TRUE, label.size = 5)
+p2 <- SpatialPlot(ST, pt.size.factor = 0.6) + NoLegend()
+p1 + p2
+ggsave(filename = './Visualization of Cluster Distribution and H&E Tissue Section.pdf', height = 8, width = 12)

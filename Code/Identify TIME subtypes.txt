@@ -1,0 +1,321 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(data.table)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(sctransform)
+library(ggsci)
+library(paletteer)
+library(msigdbr)
+library(GSVA)
+library(clusterProfiler)
+library(GSEABase)
+library(GSVAdata)
+library(org.Hs.eg.db)
+set.seed(100)
+# d_palettes <- palettes_d_names # View all color palettes
+# Set working directory
+setwd("E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis")
+# Read data
+HCC <- readRDS('./RDS/HCC_sub_annotation_malignant.RDS')  ## 35786 * 330973
+
+## Output cell statistics information ----------------------
+metdata <- HCC@meta.data
+write.csv(metdata, file = './Result/metdata.csv', quote = F, row.names = T)
+
+d1 <- table(metdata$orig.ident, metdata$sub_celltype) ## Cell subtype
+write.csv(d1, file = './Result/Cell Statistics Information 1.csv', quote = F, row.names = T)
+d2 <- table(metdata$orig.ident, metdata$celltype) ## Preliminary cell type
+write.csv(d2, file = './Result/Cell Statistics Information 2.csv', quote = F, row.names = T)
+d3 <- table(metdata$orig.ident, metdata$harmony_clusters) # Cluster number
+write.csv(d3, file = './Result/Cell Statistics Information 3.csv', quote = F, row.names = T)
+#############################################################################################
+## Single cell subgroup analysis -----------------------------------------------------------------
+## T cells (Cell communication) ------------------
+T_cell <- readRDS('./RDS/sub_celltype/sub_T_cell.RDS') 
+marker <- FindAllMarkers(T_cell, min.pct = 0.1, logfc.threshold = 1, return.thresh = 0.01, test.use = "wilcox", assay = "SCT", only.pos = T)
+marker <- marker %>% filter(!grepl(pattern = '^MT|^RP', gene))
+write.table(marker, file = './marker.txt', quote = F, row.names = T, col.names = T, sep = '\t')
+expr <- AverageExpression(T_cell, assays = "SCT", layer = "data")[[1]]
+expr <- expr[rowSums(expr) > 0,]  # Filter genes with zero expression in all cells
+expr <- as.matrix(expr)
+
+## Hallmark
+human_hallmarker_Set <- getGmt('./data/symbols.gmt')
+gsva.hallmarker <- gsva(expr, gset.idx.list = human_hallmarker_Set, 
+                        kcdf = "Gaussian",
+                        method = "gsva",
+                        parallel.sz = 12)
+
+if (F) {
+  pheatmap(gsva.hallmarker, show_colnames = T, show_rownames = T,
+           scale = "row", angle_col = "0",
+           cluster_row = T, cluster_col = T,
+           color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+           filename = './Fig/Cell Function/T Cell Subgroup Function.pdf', height = 8, width = 12
+  )
+}
+
+data <- gsva.hallmarker %>% as.data.frame()
+data$id <- rownames(gsva.hallmarker)
+data_m <- reshape2::melt(data, id.vars = c("id"))
+library(showtext)
+font_add('Arial', '/Library/Fonts/Arial.ttf') # Load font, Font library in MAC is in /Library/Fonts
+showtext_auto() # Automatically call showtext, otherwise it won't work in ggsave() as it opens and closes the graphics device.
+data_m$id <- factor(data_m$id, levels = c(rownames(data)))
+ggplot(data_m, aes(x = id, y = variable)) +
+  geom_tile(color = "grey", fill = "white", size = 0.6) +
+  scale_color_gradientn(colours = c('navy', 'white', 'firebrick3')) +
+  theme_bw() +
+  geom_point(shape = 19, aes(size = value, color = value)) +
+  labs(x = NULL, y = NULL, color = NULL) + 
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0), position = "left") +
+  theme(text = element_text(family = "Roboto"),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),
+        axis.text.y = element_text(color = "black"),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(
+          face = 'bold', ## Font style (bold, italic, etc.)
+          color = "black",
+          size = 10, ## Font size
+          lineheight = 1), ## Label line height multiplier
+        axis.text = element_text(
+          face = "bold", ## Font style (bold, italic, etc.)
+          color = "black",
+          size = 10),
+        panel.border = element_rect(fill = NA, color = "grey80", size = 1, linetype = "solid")) +
+  scale_size(range = c(1, 5), guide = NULL) +
+  guides(color = guide_colorbar(direction = "vertical",
+                                reverse = F, barwidth = unit(.6, "cm"),
+                                barheight = unit(3, "cm")))                        
+ggsave(filename = './Fig/Cell Function/T Cell Subgroup Function.pdf', height = 4, width = 12)
+
+## Pseudotime trajectory analysis
+library(monocle)
+# First, we need to get the expression matrix of the Seurat object
+DefaultAssay(T_cell) <- 'RNA'
+T_cell <- JoinLayers(T_cell)
+data <- GetAssayData(T_cell, assay = 'RNA', layer = 'counts')
+data <- as(as.matrix(data), 'sparseMatrix')
+# Next, get the meta information
+cell_metadata <- T_cell@meta.data 
+# Then, we need to get gene_annotation 
+gene_annotation <- data.frame(gene_short_name = rownames(data))
+rownames(gene_annotation) <- rownames(data)
+# Build the CDS object
+pd <- new('AnnotatedDataFrame', data = cell_metadata) 
+fd <- new('AnnotatedDataFrame', data = gene_annotation)
+# Convert pheno_data and feature_data from data.frame to AnnotatedDataFrame objects.
+cds <- newCellDataSet(data,
+                      phenoData = pd,
+                      featureData = fd,
+                      )
+
+cds <- detectGenes(cds, min_expr = 5) # This operation will add a column num_cells_expressed to fData(cds) ## Total 23628 genes
+## Remaining 27554 genes
+cds <- cds[fData(cds)$num_cells_expressed > 10, ]
+## 2. Estimate size factors and dispersions
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+## Visualize trajectory construction genes
+ordergene <- marker$gene
+cds <- setOrderingFilter(cds, ordergene)  
+plot_ordering_genes(cds)
+# Dimension reduction
+cds <- reduceDimension(cds, 
+                       max_components = 2, 
+                       num_dim = 30, 
+                       reduction_method = 'DDRTree', 
+                       #residualModelFormulaStr = "~sample", # Remove sample effects
+                       verbose = T)
+# Construct pseudotime trajectory and order cells within pseudotime
+cds <- orderCells(cds)
+# ⚠️ Use the root_state parameter to set the root of the pseudotime axis. As shown in the following pseudotime colored plot, the left side is the root. According to the state plot, the root is State1. If you want to set the other end as the root, you can do the following:
+# cds <- orderCells(cds, root_state = 5) # Set State5 as the starting point of the pseudotime axis
+## 6. Visualization
+library(ggsci)
+#ploB_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=T) #    #1597A5     #FFB4AE
+#ploB_cell_trajectory(cds,color_by="orig.ident", size=1,show_backbone=T)+ scale_color_manual(values=c("#FFB4AE","#92BEE1")) + theme(legend.position = "top")
+
+p1 <- plot_cell_trajectory(cds, size = 0.5, color_by = "sub_celltype") + theme(legend.position = "top")
+p2 <- plot_cell_trajectory(cds, size = 0.5, color_by = "Pseudotime")  
+p3 <- plot_cell_trajectory(cds, size = 0.5, color_by = "State")  + scale_color_npg()
+
+p1 + p2 / p3
+## save  8*6
+save(cds, ordergene, file = './Fig/Cell Function/T/T_cds.RData')
+
+## Use CytoTRACE to assist Monocle in determining developmental order and starting point
+## Totipotent and pluripotent stem cells, lineage-restricted oligopotent cells, multipotent and unipotent cells, differentiated cells
+library(CytoTRACE2) # loading
+####### Input Seurat object
+cytotrace2_result_sce <- cytotrace2(T_cell, ## Seurat object
+                                    is_seurat = TRUE, 
+                                    slot_type = "counts", 
+                                    species = 'human',
+                                    seed = 100,
+                                    ncores = 4)
+## Feature plot
+FeaturePlot(cytotrace2_result_sce, "CytoTRACE2_Relative", pt.size = 1.5, reduction = 'sub_cluster') + 
+  scale_colour_gradientn(colours = 
+                           (c("#9E0142", "#F46D43", "#FEE08B", "#E6F598", 
+                              "#66C2A5", "#5E4FA2")), 
+                         na.value = "transparent", 
+                         limits = c(0, 1), 
+                         breaks = seq(0, 1, by = 0.2), 
+                         labels = c("0.0 (More diff.)", 
+                                    "0.2", "0.4", "0.6", "0.8", "1.0 (Less diff.)"), 
+                         name = "Relative\norder \n", 
+                         guide = guide_colorbar(frame.colour = "black", 
+                                                ticks.colour = "black")) + 
+  ggtitle("CytoTRACE 2") + 
+  xlab("UMAP1") + ylab("UMAP2") + 
+  theme(legend.text = element_text(size = 10), 
+        legend.title = element_text(size = 12), 
+        axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 12), 
+        plot.title = element_text(size = 12, 
+                                  face = "bold", hjust = 0.5, 
+                                  margin = margin(b = 20))) + 
+  theme(aspect.ratio = 1)
+ggsave(filename = './Fig/Cell Function/T/CytoTRACE Development Analysis.pdf', height = 6, width = 8)
+
+## Combine with Monocle2 to determine the starting point
+# The prediction results are already in the metadata, and you can plot the results based on the differentiation score in Monocle2 to help determine the starting point.
+metdata <- data.frame(cds$sub_celltype)
+metdata$name <- colnames(cds)
+data2 <- data.frame(na.omit(cytotrace2_result_sce$CytoTRACE2_Relative))
+data2$name <- rownames(data2)
+score <- merge(metdata, data2)
+score1 <- score[match(metdata$name, score$name),]
+cds$CytoTRACE2_Score <- score1$na.omit.cytotrace2_result_sce.CytoTRACE2_Relative.
+plot_cell_trajectory(cds, size = 0.5, color_by = "CytoTRACE2_Score")  +    
+  scale_colour_gradientn(colours = 
+                           (c("#9E0142", "#F46D43", "#FEE08B", "#E6F598", 
+                              "#66C2A5", "#5E4FA2")), 
+                         na.value = "transparent", 
+                         limits = c(0, 1), 
+                         breaks = seq(0, 1, by = 0.2), 
+                         labels = c("0.0 ", 
+                                    "0.2", "0.4", "0.6", "0.8", "1.0 "), 
+                         name = "Relative\norder \n", 
+                         guide = guide_colorbar(frame.colour = "black", 
+                                                ticks.colour = "black")) 
+ggsave(filename = './Fig/Cell Function/T/CytoTRACE Starting Point Inference.pdf', height = 6, width = 8)
+
+## Cell communication
+if (F) {
+  library(cellcall)
+  library(stringr)
+  # Construct cellcall object
+  test <- CreateObject_fromSeurat(Seurat.object = T_cell, # Seurat object
+                                  slot = "counts",  # Data type
+                                  cell_type = "sub_celltype", # Cell type
+                                  data_source = "UMI", # Data frame format "UMI", "fullLength", "TPM" or "CPM"
+                                  scale.factor = 10^6, 
+                                  Org = "Homo sapiens" # Species information "Homo sapiens", "Mus musculus"
+  )
+
+  # Next, infer cell-cell communication scores.
+  mt <- TransCommuProfile(object = test,
+                          pValueCor = 0.05, 
+                          CorValue = 0.1,
+                          topTargetCor = 1,
+                          p.adjust = 0.05,
+                          use.type = "median",
+                          probs = 0.9,
+                          method = "weighted", # "weighted", "max", "mean"
+                          IS_core = TRUE,
+                          Org = 'Homo sapiens' # "Homo sapiens", "Mus musculus"
+  )
+
+  save(mt, file = "./Fig/Cell Function/T/communication.RData")
+  # CellCall embeds a pathway activity analysis method to help explore the main pathways involved in communication between certain cells. This integration is not common in other tools, so let's take a look.
+  n <- mt@data$expr_l_r_log2_scale
+  pathway.hyper.list <- lapply(colnames(n), function(i) {
+    print(i)
+    tmp <- getHyperPathway(data = n, object = mt, cella_cellb = i, Org = "Homo sapiens")
+    return(tmp)
+  })
+
+  myPub.df <- getForBubble(pathway.hyper.list, cella_cellb = colnames(n))
+  myPub.df <- myPub.df[myPub.df$NES != 0, ]
+  plotBubble(myPub.df)
+  ## save 6*12
+  # 5. Visualization of cell interactions
+  # Like other tools, let's make a circle plot to show all the interactions between cells.
+  # Set as many colors as there are cell types
+  cell_color <- data.frame(color = c("Follicular B cell GPR183+" = "orange", 
+                                     "Active B cell CD69+" = "#FF7BAC", 
+                                     "Plasma B cell IGHM+" = "#BDCCD4", 
+                                     "Plasma B cell IGKC+" = "#FF1D25", 
+                                     "Memory B cell MS4A1+" = "#3FA9F5",
+                                     'B cell IL32+' = "#7AC943", 
+                                     "Plasma B cell IGHG1+" = "#FCCDE5"), stringsAsFactors = FALSE)
+  # Using CellCall object to draw the circle plot
+  ViewInterCircos(object = mt, font = 2, cellColor = cell_color, 
+                  lrColor = c("#F16B6F", "#84B1ED"),
+                  arr.type = "big.arrow", arr.length = 0.04,
+                  trackhight1 = 0.05, slot = "expr_l_r_log2_scale",
+                  linkcolor.from.sender = TRUE,
+                  linkcolor = NULL, gap.degree = 0.5, # Set smaller if there are many cell types, otherwise the plot won't fit
+                  order.vector = names(table(T_cell$sub_celltype)),
+                  trackhight2 = 0.032, track.margin2 = c(0.01, 0.12), DIY = FALSE) 
+  ## save 8*10
+  
+  # You can also use a heatmap to present detailed communication scores of L-R interactions between different cell types.
+  viewPheatmap(object = mt, slot = "expr_l_r_log2_scale", show_rownames = T,
+               show_colnames = T, treeheight_row = 0, treeheight_col = 10,
+               cluster_rows = T, cluster_cols = F, fontsize = 10, angle_col = "90",  
+               main = "score")
+  # save 6*10
+  # Sankey diagram
+  mt <- LR2TF(object = mt, sender_cell = "B cell IL32+", recevier_cell = "Memory B cell MS4A1+",
+              slot = "expr_l_r_log2_scale", org = "Homo sapiens")
+  head(mt@reductions$sankey)
+  LRT.Dimplot(mt, fontSize = 10, nodeWidth = 30, height = 400, width = 1200, 		 
+              sinksRight = FALSE, DIY.color = FALSE)
+  ## Filtered Sankey diagram
+  library(magrittr)
+  library(dplyr)
+  tmp <- mt@reductions$sankey
+  tmp1 <- dplyr::filter(tmp, weight1 > 0) ## Filter triple relation with weight1 (LR score)
+  tmp.df <- trans2tripleScore(tmp1)  ## Transform weight1 and weight2 to one value (weight)
+  tmp.df$Ligand <- do.call(rbind, strsplit(tmp.df$Ligand, split = ':'))[, 2]
+  tmp.df$Receptor <- do.call(rbind, strsplit(tmp.df$Receptor, split = ':'))[, 2]
+  tmp.df$TF <- do.call(rbind, strsplit(tmp.df$TF, split = ':'))[, 2]
+  head(tmp.df)
+  
+  ## Set the color of nodes in the Sankey graph
+  mycol.vector = c('#F56E68', '#FEB5AF', '#FFF4F2', '#1597A5', 'grey', '#67cdf2', '#FFC249', '#5d62b5', '#FB8402', '#477DD0', 'orange')  
+  elments.num <-  tmp.df %>% unlist %>% unique %>% length()
+  mycol.vector.list <- rep(mycol.vector, times = ceiling(elments.num / length(mycol.vector)))
+  
+  sankey_graph(df = tmp.df, axes = 1:3, mycol = mycol.vector.list[1:elments.num], nudge_x = NULL, font.size = 4, boder.col = "white", isGrandSon = F)
+  ## save 8*6
+  
+  ## Select genes to display according to genes
+  # 6. Transcription factor enrichment plot
+  TF <- names(mt@data$gsea.list$Hepatocyte@geneSets)
+  getGSEAplot(gsea.list = mt@data$gsea.list, geneSetID = c("MED1", "PPARGC1A", "SREBF1"), 
+              myCelltype = "Hepatocyte", # Receiving cell type
+              fc.list = mt@data$fc.list,  
+              selectedGeneID = mt@data$gsea.list$Hepatocyte@geneSets$MED1[1:10],
+              mycol = NULL)
+  
+  # Ridge plot
+  ## GSEA object
+  egmt <- mt@data$gsea.list$Hepatocyte
+  
+  ## Filter TF
+  egmt.df <- data.frame(egmt)
+  head(egmt.df[, 1:6])
+  flag.index <- which(egmt.df$p.adjust < 0.05)
+  
+  ridgeplot.DIY(x = egmt, fill = "p.adjust", showCategory = flag.index, core_enrichment = T,
+                orderBy = "NES", decreasing = FALSE)
+}

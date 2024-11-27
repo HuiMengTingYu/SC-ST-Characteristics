@@ -1,0 +1,160 @@
+options(BioC_mirror = "https://mirrors.westlake.edu.cn/bioconductor")
+library(PharmacoGx)
+
+## Download PharmacoSet objects ----------------------------------------------------------------------------
+availablePSets()
+GDSC <- downloadPSet("GDSC_2020(v2-8.2)")
+save(GDSC, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/GDSC.RData')
+CTRPv2 <- downloadPSet("CTRPv2_2015")
+save(CTRPv2, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/CTRPv2.RData')
+CCLE <- downloadPSet("CCLE_2015")
+save(CCLE, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/CCLE.RData')
+PRISM <- downloadPSet("PRISM_2020")
+save(PRISM, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/PRISM.RData')
+gCSI <- downloadPSet("gCSI_2019")
+save(gCSI, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/gCSI.RData')
+PDTX <- downloadPSet("PDTX_2019")
+save(PDTX, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/PDTX.RData')
+NCI60 <- downloadPSet("NCI60_2021")
+save(NCI60, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/NCI60.RData')
+
+save(GDSC, CTRPv2, CCLE, PRISM, gCSI, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/data/Drug_DataBase/Drug.RData')
+
+# AAC matrix division ----------------------------------------------------------------------
+df_list <- list(CCLE_HCC$AAC, CTRPv2_HCC$AAC, gCSI_HCC$AAC, GDSC_HCC$AAC, PRISM_HCC$AAC)
+drug <- c('CCLE', 'CTRPv2', 'gCSI', 'GDSC', 'PRISM')
+for (i in 1:5) {
+  df_list[[i]][, 'rowname'] <- paste0(rownames(df_list[[i]]), '/', drug[i])
+  rownames(df_list[[i]]) <- df_list[[i]][, 'rowname']
+}
+# Use Reduce to merge
+combined_df <- Reduce(function(x, y) full_join(x, y, by = "rowname"), df_list)
+# Use strsplit to keep the first result
+combined_df$rowname <- sapply(strsplit(combined_df$rowname, split = '/'), `[`, 1)
+## Determine the proportion of NA values, remove rows and columns where the proportion of NA is greater than 0.5
+combined_df[is.na(combined_df)] <- 0 
+## Merge rows and columns with the same names
+Drug <- data.frame('rowname' = combined_df$rowname)
+combined_df$rowname <- NULL
+col <- sapply(strsplit(colnames(combined_df), split = '.[xy]'), `[`, 1)
+col_uni <- unique(col)
+for (i in 1:length(col_uni)) {
+  if (sum(col %in% col_uni[i]) > 1) {
+    Drug[, i + 1] <- rowMeans(combined_df[, col %in% col_uni[i]])
+    colnames(Drug)[i + 1] <- col_uni[i]
+  } else {
+    Drug[, i + 1] <- combined_df[, col %in% col_uni[i]]
+    colnames(Drug)[i + 1] <- col_uni[i]
+  }
+}
+row <- sapply(strsplit(Drug$rowname, split = '/'), `[`, 1)
+row_uni <- unique(row)
+Drug_clean <- data.frame('colname' = col_uni)
+rownames(Drug_clean) <- Drug_clean$rowname
+for (i in 1:length(row_uni)) {
+  if (sum(row %in% row_uni[i]) > 1) {
+    Drug_clean[, i + 1] <- colMeans(Drug[row %in% row_uni[i], -1])
+  } else {
+    Drug_clean[, i + 1] <- Drug[row %in% row_uni[i], -1]
+  }
+}
+Drug_clean <- t(Drug_clean[, -1]) %>% as.data.frame()
+rownames(Drug_clean) <- row_uni
+colnames(Drug_clean) <- col_uni
+
+## Determine the proportion of zero values in each row and column, retain drugs with a zero value proportion less than 0.5
+row_zero_ratio <- rowSums(Drug_clean == 0) / ncol(Drug_clean)
+col_zero_ratio <- colSums(Drug_clean == 0) / nrow(Drug_clean)
+Drug <- round(Drug_clean[row_zero_ratio < 0.5, col_zero_ratio < 0.5], 6)
+# Calculate the proportion of values greater than the mean for each row
+row_greater_than_mean_ratio <- apply(Drug, 1, function(x) {
+  sum(x > median(x)) / length(x)
+})
+Drug_AAC <- Drug[row_greater_than_mean_ratio > 0, ]
+Drug_AAC_label <- Drug_AAC
+for (i in 1:dim(Drug_AAC)[2]) {
+  Drug_AAC_label[, i] <- ifelse(Drug_AAC_label[, i] > median(Drug_AAC_label[, i]), "High", "Low")
+}
+
+Drug_AAC$label <- ifelse(apply(Drug_AAC_label, 1, function(x) {sum(x == "High") / length(x)}) > 0.5, "High", "Low")
+
+df_long <- reshape2::melt(Drug_AAC, id.vars = "label")
+# Draw a boxplot
+library(ggplot2)
+library(ggpubr)
+ggplot(df_long, aes(x = variable, y = value, fill = label)) +
+  geom_boxplot() +
+  labs(x = "Cell Line", y = "AAC Value") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif")  # Significance comparison
+ggsave(filename = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/Fig/Drug Sensitivity Analysis/AAC High-Low Group Boxplot.pdf', width = 20, height = 10)
+write.csv(Drug_AAC, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/Result/Drug Cell Line Expression/AAC Drug Expression.csv')
+##########################################################################
+# IC50 matrix division ----------------------------------------------------------------------
+df_list <- list(CCLE_HCC$IC50, CTRPv2_HCC$IC50, gCSI_HCC$IC50, GDSC_HCC$IC50, PRISM_HCC$IC50)
+drug <- c('CCLE', 'CTRPv2', 'gCSI', 'GDSC', 'PRISM')
+for (i in 1:5) {
+  df_list[[i]][, 'rowname'] <- paste0(rownames(df_list[[i]]), '/', drug[i])
+  rownames(df_list[[i]]) <- df_list[[i]][, 'rowname']
+}
+# Use Reduce to merge
+combined_df <- Reduce(function(x, y) full_join(x, y, by = "rowname"), df_list)
+# Use strsplit to keep the first result
+combined_df$rowname <- sapply(strsplit(combined_df$rowname, split = '/'), `[`, 1)
+## Determine the proportion of NA values, remove rows and columns where the proportion of NA is greater than 0.5
+combined_df[is.na(combined_df)] <- 0 
+## Merge rows and columns with the same names
+Drug <- data.frame('rowname' = combined_df$rowname)
+combined_df$rowname <- NULL
+col <- sapply(strsplit(colnames(combined_df), split = '.[xy]'), `[`, 1)
+col_uni <- unique(col)
+for (i in 1:length(col_uni)) {
+  if (sum(col %in% col_uni[i]) > 1) {
+    Drug[, i + 1] <- rowMeans(combined_df[, col %in% col_uni[i]])
+    colnames(Drug)[i + 1] <- col_uni[i]
+  } else {
+    Drug[, i + 1] <- combined_df[, col %in% col_uni[i]]
+    colnames(Drug)[i + 1] <- col_uni[i]
+  }
+}
+row <- sapply(strsplit(Drug$rowname, split = '/'), `[`, 1)
+row_uni <- unique(row)
+Drug_clean <- data.frame('colname' = col_uni)
+rownames(Drug_clean) <- Drug_clean$rowname
+for (i in 1:length(row_uni)) {
+  if (sum(row %in% row_uni[i]) > 1) {
+    Drug_clean[, i + 1] <- colMeans(Drug[row %in% row_uni[i], -1])
+  } else {
+    Drug_clean[, i + 1] <- Drug[row %in% row_uni[i], -1]
+  }
+}
+Drug_clean <- t(Drug_clean[, -1]) %>% as.data.frame()
+rownames(Drug_clean) <- row_uni
+colnames(Drug_clean) <- col_uni
+
+## Determine the proportion of zero values in each row and column, retain drugs with a zero value proportion less than 0.5
+row_zero_ratio <- rowSums(Drug_clean == 0) / ncol(Drug_clean)
+col_zero_ratio <- colSums(Drug_clean == 0) / nrow(Drug_clean)
+Drug <- round(Drug_clean[row_zero_ratio < 0.5, col_zero_ratio < 0.5], 6)
+# Calculate the proportion of values greater than the mean for each row
+row_greater_than_mean_ratio <- apply(Drug, 1, function(x) {
+  sum(x < median(x)) / length(x)
+})
+Drug_IC50 <- Drug[row_greater_than_mean_ratio > 0, ]
+Drug_IC50_label <- Drug_IC50
+for (i in 1:dim(Drug_IC50)[2]) {
+  Drug_IC50_label[, i] <- ifelse(Drug_IC50_label[, i] > median(Drug_IC50_label[, i]), "High", "Low")
+}
+
+Drug_IC50$label <- ifelse(apply(Drug_IC50_label, 1, function(x) {sum(x == "High") / length(x)}) > 0.5, "High", "Low")
+
+df_long <- reshape2::melt(Drug_IC50, id.vars = "label")
+# Draw a boxplot
+library(ggplot2)
+library(ggpubr)
+ggplot(df_long, aes(x = variable, y = value, fill = label)) +
+  geom_boxplot(outlier.shape = NA) +  # Remove outliers
+  coord_cartesian(ylim = c(0, 15)) +
+  labs(x = "Cell Line", y = "IC50 Value") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.y = 15)  # Significance comparison
+ggsave(filename = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/Fig/Drug Sensitivity Analysis/IC50 High-Low Group Boxplot.pdf', width = 20, height = 10)
+write.csv(Drug_IC50, file = 'E:/Desktop/Graduate Project/2. Spatial Transcriptomics + Metastasis/Result/Drug Cell Line Expression/IC50 Drug Expression.csv')
