@@ -1,4 +1,4 @@
-SC
+SCRNA  data sets
 GSE140228	13
 GSE149614	10
 GSE156625	57
@@ -12,23 +12,22 @@ GSE229772	27
 GSE235057	10
 GSE245906	10
 
-总数
+all sample
 141
 
-TIME验证集
+TIME validation data sets
 PMID: 34145435	6
 GSE151530	32
 
-ST
-训练集
+ST train data sets
 GSE245908	2
-验证集
+validation data sets
 GSE185477	1
 GSE224411	1
 HRA000437	3
 
 
-bulk
+bulk data sets
 GSE14520	242
 TCGA-LIHC	418
 
